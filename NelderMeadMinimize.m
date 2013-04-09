@@ -72,10 +72,18 @@ SetAttributes[apply, HoldRest];
 apply[f : _Function | _CompiledFunction, vars : {__Symbol}] :=
   Function[arglist, Block[vars, vars = arglist; f @@ vars]];
 
-(* Compilable version of Total@Abs@Differences[lst] for inlining *)
+(* Version-specific compilable Ordering *)
+ClearAll[ordering];
+ordering = If[$VersionNumber >= 8, Ordering,
+   (* The Mathematica 6 and 7 runtimes don't have support for Ordering *)
+   Function[{lst}, IntegerPart@Last@Transpose@Sort@Transpose[{lst, Range@Length[lst]}]]
+  ];
+
+(* Inlinable utility function *)
 ClearAll[cumulativeAbsoluteDifferences];
-cumulativeAbsoluteDifferences = Function[{lst},
-   Plus @@ Abs[Most[lst] - Rest[lst]]
+cumulativeAbsoluteDifferences = If[$VersionNumber >= 8,
+   Function[{lst}, Total@Abs@Differences[lst]/Length[lst]],
+   Function[{lst}, Total@Abs[Most[lst] - Rest[lst]]/Length[lst]]
   ];
 
 (* Produces compiled code for the Nelder-Mead algorithm with the objective function inlined *)
@@ -98,7 +106,8 @@ NelderMeadMinimize`Dump`CompiledNelderMead[
      epsilon = $MachineEpsilon,
      (* Inlined functions *)
      f = apply[objectiveFunction, vars],
-     diffs = cumulativeAbsoluteDifferences,
+     ordering = ordering,
+     totalAbsDiffs = cumulativeAbsoluteDifferences,
      (* Return values *)
      return = Switch[OptionValue["ReturnValues"],
        "OptimizedParameters", Function[Null, simplex[[best]]],
@@ -114,12 +123,12 @@ NelderMeadMinimize`Dump`CompiledNelderMead[
      (* Options to be passed to Compile *)
      compileopts = Sequence @@ If[$VersionNumber >= 8, {
          (* Mathematica 8 and above offer improved behaviour using these options *)
-         CompilationOptions -> {"InlineCompiledFunctions" -> True},
+         CompilationOptions -> {"ExpressionOptimization" -> True, "InlineCompiledFunctions" -> True},
          RuntimeOptions -> {"CompareWithTolerance" -> False, "EvaluateSymbolically" -> False},
          CompilationTarget -> OptionValue[CompilationTarget]
         }, {
-         (* Ordering is an external call in Mathematica 7 and so needs type information *)
-         {{_Ordering, _Integer, 1}}
+         (* Undocumented optimization level option for Mathematica 6 and 7 *)
+         "CompileOptimizations" -> All
         }
        ]
     },
@@ -128,7 +137,7 @@ NelderMeadMinimize`Dump`CompiledNelderMead[
        (* Housekeeping *)
        history = Table[infinity, {historyLength}], iteration = maxit,
        (* Basic quantities *)
-       simplex = pts, vals = f /@ pts, ordering,
+       simplex = pts, vals = f /@ pts, order,
        (* Calculated points and function values *)
        centroid = origin,
        reflectedPoint = origin, reflectedValue = infinity,
@@ -142,13 +151,13 @@ NelderMeadMinimize`Dump`CompiledNelderMead[
       },
       While[
        (* Order simplex points by function value *)
-       ordering = Ordering[vals];
-       vals = vals[[ordering]]; simplex = simplex[[ordering]];
+       order = ordering[vals];
+       vals = vals[[order]]; simplex = simplex[[order]];
        (* Decrement and test iterator *)
        (iteration--) != 0,
        (* Check for convergence *)
        history[[1]] = vals[[best]]; history = RotateLeft[history];
-       If[diffs[history] <= tol + epsilon diffs[history],
+       If[totalAbsDiffs[history] <= tol + epsilon totalAbsDiffs[history],
         Break[]
        ];
        (* Find centroid of best (N - 1) points *)
